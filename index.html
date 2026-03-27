@@ -239,20 +239,19 @@ body::before{
    §1  CONFIG  — tweak here without touching logic
 ───────────────────────────────────────────────────────── */
 const CFG = {
-  W:640, H:480,             // camera resolution
+  W:640, H:480,
 
-  HOLD_FRAMES:   30,        // frames to hold gesture (~1 s at 30 fps)
-  DECAY_RATE:     3,        // how fast charge drops when gesture lost
+  HOLD_FRAMES: 30,
+  DECAY_RATE: 3,
 
-  /* Voting buffer — kills false positives from brief twitches.
-     Gesture counts only when positive in ≥ VOTE_THRESH of last VOTE_WIN frames. */
-  VOTE_WIN:   8,
-  VOTE_THRESH:6,
+  VOTE_WIN: 8,
+  VOTE_THRESH: 6,
 
-  COOLDOWN_MS:   5000,      // ms before jutsu can fire again
+  COOLDOWN_MS: 5000,
 
-  PARTICLES:     160,       // smoke particles per main burst
-  NUM_CLONES:    4,         // shadow clone positions
+  PARTICLES: 260,   // ✅ correct
+
+  NUM_CLONES: 4
 };
 
 /* ─────────────────────────────────────────────────────────
@@ -556,7 +555,13 @@ function spawnClones(){
     el.style.cssText = `
       width:${W}px;height:${H}px;
       left:${bL}px;top:${bT}px;
-      filter:blur(1.5px) brightness(${d.bri}) saturate(${d.sat}) hue-rotate(${d.hue}deg);
+      filter:
+       contrast(1.4)
+       brightness(0.85)
+       saturate(0.6)
+       hue-rotate(${d.hue}deg)
+       drop-shadow(0 0 20px rgba(79,195,247,0.6))
+       drop-shadow(0 0 40px rgba(79,195,247,0.3));
       --ce:translateX(${dxE}px) translateY(${dyE}px) scale(${d.scale*.7}) scaleX(${sx}) rotate(${ti*2}deg);
       --cp:translateX(${dxP}px) translateY(${dyP}px) scale(${d.scale*1.04}) scaleX(${sx}) rotate(${-ti*.3}deg);
       --cr:translateX(0) translateY(0) scale(${d.scale}) scaleX(${sx}) rotate(${ti*.4}deg);
@@ -704,6 +709,16 @@ function fireJutsu(){
   playJutsuSound();                     // immediate audio
   triggerFlash();                       // immediate flash
 
+     document.body.animate([
+  { transform: 'translate(0,0)' },
+  { transform: 'translate(-6px,4px)' },
+  { transform: 'translate(6px,-4px)' },
+  { transform: 'translate(0,0)' }
+], {
+  duration: 300,
+  iterations: 2
+});
+     
   /* Smoke from scene center + four corner clusters */
   const W = partCanvas.width, H = partCanvas.height;
   spawnSmokeBurst(W*.5,  H*.5,  CFG.PARTICLES);
