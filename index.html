@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>影分身の術 — Shadow Clone Jutsu</title>
+
+<!-- ════════════════════════════════════════════
+     MEDIAPIPE CDN LIBRARIES
+     Hands: 21-point hand landmark detection
+     Camera Utils: pipes webcam frames to model
+     Drawing Utils: skeleton / dot helpers
+════════════════════════════════════════════ -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@700;900&family=Share+Tech+Mono&display=swap');
+
+/* ── Design tokens ── */
+:root{
+  --bg:      #070910;
+  --accent:  #f5a623;
+  --chakra:  #4fc3f7;
+  --danger:  #ef5350;
+  --green:   #66bb6a;
+  --jp:      'Noto Serif JP',serif;
+  --mono:    'Share Tech Mono',monospace;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:var(--bg);color:#d0dce8;
+  font-family:var(--mono);overflow:hidden;user-select:none}
+
+/* Animated grid background */
+body::before{
+  content:'';position:fixed;inset:0;
+  background-image:
+    linear-gradient(rgba(79,195,247,.025) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(79,195,247,.025) 1px,transparent 1px);
+  background-size:44px 44px;
+  animation:gridDrift 30s linear infinite;
+  pointer-events:none;z-index:0;
+}
+@keyframes gridDrift{to{background-position:44px 44px}}
+
+/* ── Layout ── */
+#app{
+  position:relative;width:100vw;height:100vh;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  z-index:1;
+}
+
+/* ── HUD top ── */
+#hud{
+  position:absolute;top:0;left:0;right:0;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 22px;
+  background:linear-gradient(to bottom,rgba(0,0,0,.75),transparent);
+  z-index:20;
+}
+.hud-title{
+  font-family:var(--jp);font-size:1rem;font-weight:900;
+  color:var(--accent);letter-spacing:.06em;
+  text-shadow:0 0 18px rgba(245,166,35,.55);
+}
+.hud-title span{color:var(--chakra)}
+.hud-right{display:flex;align-items:center;gap:18px}
+
+/* status pill */
+#status-pill{display:flex;align-items:center;gap:7px;font-size:.68rem;letter-spacing:.12em;color:#5a7a90}
+#status-dot{
+  width:7px;height:7px;border-radius:50%;background:#333;
+  transition:background .25s,box-shadow .25s;
+}
+#status-dot.live    {background:#4caf50;box-shadow:0 0 8px #4caf50}
+#status-dot.hold    {background:var(--accent);box-shadow:0 0 14px var(--accent)}
+#status-dot.cooldown{background:var(--danger);box-shadow:0 0 10px var(--danger)}
+
+/* cooldown badge */
+#cd-badge{font-size:.68rem;letter-spacing:.1em;color:var(--danger);opacity:0;transition:opacity .3s}
+#cd-badge.on{opacity:1}
+
+/* ── Scene wrapper ── */
+#scene{
+  position:relative;border-radius:14px;overflow:hidden;
+  box-shadow:0 0 0 1px rgba(79,195,247,.12),0 30px 90px rgba(0,0,0,.8);
+  z-index:2;
+}
+#webcam{display:none}
+#cam-canvas{display:block;transform:scaleX(-1);width:100%;height:100%}
+#fx-canvas,#particle-canvas{position:absolute;inset:0;pointer-events:none}
+
+/* ── HUD bottom ── */
+#bottom-hud{
+  position:absolute;bottom:0;left:0;right:0;
+  padding:0 22px 14px;
+  background:linear-gradient(to top,rgba(0,0,0,.75),transparent);
+  z-index:20;
+}
+#charge-wrap{display:flex;align-items:center;gap:10px;margin-bottom:9px}
+#charge-label{font-size:.6rem;letter-spacing:.16em;color:#3a5a70;text-transform:uppercase;white-space:nowrap}
+#charge-track{flex:1;height:4px;background:rgba(255,255,255,.05);border-radius:2px;overflow:hidden}
+#charge-fill{
+  height:100%;width:0%;border-radius:2px;
+  background:linear-gradient(to right,var(--chakra),var(--accent));
+  transition:width .08s linear,background .3s;
+  position:relative;
+}
+#charge-fill::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);
+  background-size:60px 100%;
+  animation:shimmer 1.2s linear infinite;
+  opacity:0;
+}
+#charge-fill.charging::after{opacity:1}
+@keyframes shimmer{0%{background-position:-60px 0}100%{background-position:200px 0}}
+#charge-fill.ready{background:linear-gradient(to right,var(--green),var(--accent))}
+#charge-pct{font-size:.6rem;letter-spacing:.08em;color:#3a5a70;width:30px;text-align:right}
+#guide{display:flex;align-items:center;justify-content:center;gap:20px;flex-wrap:wrap}
+.gi{display:flex;align-items:center;gap:6px;font-size:.62rem;letter-spacing:.1em;color:#3a5870;text-transform:uppercase}
+.gd{width:5px;height:5px;border-radius:50%;background:var(--chakra);opacity:.45}
+
+/* ── Full-screen flash ── */
+#flash{position:fixed;inset:0;background:white;opacity:0;pointer-events:none;z-index:200;transition:opacity .15s}
+
+/* ── Kanji overlay ── */
+#kanji-ov{
+  position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  z-index:180;pointer-events:none;opacity:0;
+}
+#kanji-ov.pop{animation:kanjiAnim 2s cubic-bezier(.22,.68,0,1.4) forwards}
+@keyframes kanjiAnim{
+  0%  {opacity:0;transform:scale(3) rotate(-4deg)}
+  10% {opacity:1;transform:scale(.97) rotate(1deg)}
+  70% {opacity:1;transform:scale(1) rotate(0)}
+  100%{opacity:0;transform:scale(.85) rotate(-2deg)}
+}
+#kanji-txt{
+  font-family:var(--jp);font-size:clamp(3.5rem,13vw,9rem);font-weight:900;
+  color:transparent;-webkit-text-stroke:2px var(--accent);
+  text-shadow:0 0 50px rgba(245,166,35,.9),0 0 100px rgba(245,166,35,.4);
+  letter-spacing:.06em;
+}
+
+/* ── Shadow clone images ── */
+.shadow-clone{
+  position:fixed;pointer-events:none;z-index:160;border-radius:10px;
+  transform-origin:center bottom;
+  animation:cloneReveal 3s ease-out forwards;
+}
+@keyframes cloneReveal{
+  0%  {opacity:0;  transform:var(--ce)}
+  12% {opacity:.88;transform:var(--cp)}
+  75% {opacity:.72;transform:var(--cr)}
+  100%{opacity:0;  transform:var(--cx)}
+}
+
+/* ── Loading screen ── */
+#loader{
+  position:fixed;inset:0;background:var(--bg);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
+  z-index:300;transition:opacity .6s;
+}
+#loader.gone{opacity:0;pointer-events:none}
+.lk{font-family:var(--jp);font-size:2.8rem;font-weight:900;color:var(--accent);
+    animation:loadPulse 1.6s ease-in-out infinite}
+@keyframes loadPulse{
+  0%,100%{opacity:.35;text-shadow:none}
+  50%    {opacity:1;text-shadow:0 0 28px rgba(245,166,35,.7)}
+}
+.ls{font-size:.7rem;letter-spacing:.22em;color:#2a4050;text-transform:uppercase}
+#lerr{font-size:.75rem;color:var(--danger);letter-spacing:.1em;display:none;
+      margin-top:10px;text-align:center;padding:0 20px}
+</style>
+</head>
+<body>
+
+<div id="loader">
+  <div class="lk">影分身の術</div>
+  <div class="ls">Awakening Chakra System…</div>
+  <div id="lerr"></div>
+</div>
+
+<div id="flash"></div>
+<div id="kanji-ov"><div id="kanji-txt">影分身！</div></div>
+
+<div id="app">
+  <div id="hud">
+    <div class="hud-title">影分身の術 <span>// Shadow Clone Jutsu</span></div>
+    <div class="hud-right">
+      <div id="cd-badge">⏳ COOLDOWN</div>
+      <div id="status-pill">
+        <div id="status-dot"></div>
+        <span id="status-txt">Awaiting camera</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="scene" style="width:min(90vw,640px);height:min(67.5vw,480px)">
+    <video id="webcam" playsinline></video>
+    <canvas id="cam-canvas"></canvas>
+    <canvas id="fx-canvas"></canvas>
+    <canvas id="particle-canvas"></canvas>
+  </div>
+
+  <div id="bottom-hud">
+    <div id="charge-wrap">
+      <span id="charge-label">Jutsu Charge</span>
+      <div id="charge-track"><div id="charge-fill"></div></div>
+      <span id="charge-pct">0%</span>
+    </div>
+    <div id="guide">
+      <div class="gi"><div class="gd"></div>Raise index + middle finger</div>
+      <div class="gi"><div class="gd"></div>Fold ring + pinky down</div>
+      <div class="gi"><div class="gd"></div>Hold ~1 second → Jutsu!</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════
+   SHADOW CLONE JUTSU — Full JavaScript
+   ─────────────────────────────────────────────────────────
+   §1  Config
+   §2  DOM Refs & Canvas Setup
+   §3  Gesture Detection (voting buffer)
+   §4  Sound Engine (Web Audio, no files)
+   §5  Particle Smoke System (canvas 2D)
+   §6  Shadow Clone Images (CSS keyframes)
+   §7  Screen Effects (flash, kanji)
+   §8  Jutsu Master Trigger + Cooldown
+   §9  MediaPipe Hands Render Loop
+   §10 Camera Start
+══════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────
+   §1  CONFIG  — tweak here without touching logic
+───────────────────────────────────────────────────────── */
+const CFG = {
+  W:640, H:480,             // camera resolution
+
+  HOLD_FRAMES:   30,        // frames to hold gesture (~1 s at 30 fps)
+  DECAY_RATE:     3,        // how fast charge drops when gesture lost
+
+  /* Voting buffer — kills false positives from brief twitches.
+     Gesture counts only when positive in ≥ VOTE_THRESH of last VOTE_WIN frames. */
+  VOTE_WIN:   8,
+  VOTE_THRESH:6,
+
+  COOLDOWN_MS:   5000,      // ms before jutsu can fire again
+
+  PARTICLES:     160,       // smoke particles per main burst
+  NUM_CLONES:    4,         // shadow clone positions
+};
+
+/* ─────────────────────────────────────────────────────────
+   §2  DOM REFS & CANVAS SETUP
+───────────────────────────────────────────────────────── */
+const video      = document.getElementById('webcam');
+const camCanvas  = document.getElementById('cam-canvas');
+const fxCanvas   = document.getElementById('fx-canvas');
+const partCanvas = document.getElementById('particle-canvas');
+const flash      = document.getElementById('flash');
+const kanjiOv    = document.getElementById('kanji-ov');
+const statusDot  = document.getElementById('status-dot');
+const statusTxt  = document.getElementById('status-txt');
+const chargeFill = document.getElementById('charge-fill');
+const chargePct  = document.getElementById('charge-pct');
+const cdBadge    = document.getElementById('cd-badge');
+const loader     = document.getElementById('loader');
+const lerr       = document.getElementById('lerr');
+
+const camCtx  = camCanvas.getContext('2d');
+const fxCtx   = fxCanvas.getContext('2d');
+const partCtx = partCanvas.getContext('2d');
+
+/* Resize all canvases to match #scene's actual pixel size */
+function resizeCanvases(){
+  const s = document.getElementById('scene');
+  const w = s.offsetWidth, h = s.offsetHeight;
+  [camCanvas, fxCanvas, partCanvas].forEach(c=>{c.width=w;c.height=h});
+}
+resizeCanvases();
+window.addEventListener('resize', resizeCanvases);
+
+/* ─────────────────────────────────────────────────────────
+   §3  GESTURE DETECTION
+   ─────────────────────────────────────────────────────────
+
+   MediaPipe provides 21 hand landmarks (0-20), each with
+   normalized {x,y,z} values (0 = top-left of frame, 1 = bottom-right).
+
+   Landmark map (key indices):
+     0  Wrist
+     4  Thumb tip
+     5  Index MCP (knuckle)   6  Index PIP   8  Index TIP
+     9  Middle MCP            10 Middle PIP  12 Middle TIP
+     13 Ring MCP              14 Ring PIP    16 Ring TIP
+     17 Pinky MCP             18 Pinky PIP   20 Pinky TIP
+
+   "Finger UP"     → tip.y < pip.y  (tip is ABOVE the joint on screen)
+   "Finger CURLED" → tip.y > mcp.y  (tip is BELOW the base knuckle)
+
+   A dead-zone margin (0.025) prevents borderline positions from
+   flip-flopping between states on every frame.
+
+   VOTING BUFFER:
+   We store the last VOTE_WIN raw results in a ring buffer.
+   The gesture only counts as "active" when it appears in
+   ≥ VOTE_THRESH of those frames. This eliminates flicker triggers.
+
+   HOW TO CHANGE THE GESTURE:
+   Edit rawGestureDetect(). Examples:
+     Rock 🤘  → index+pinky UP, middle+ring CURLED
+     Spock 🖖 → index+middle UP, ring+pinky UP, separated
+     Fist ✊  → all four fingers CURLED
+     Palm 🖐  → all four fingerUp() checks pass
+───────────────────────────────────────────────────────── */
+const voteBuffer = new Array(CFG.VOTE_WIN).fill(0);
+let   voteIdx    = 0;
+
+/* Returns true when a finger tip is clearly ABOVE its PIP joint */
+function fingerUp(lm, tip, pip){
+  return lm[tip].y < lm[pip].y - 0.025;  // 0.025 dead-zone margin
+}
+
+/* Returns true when a finger tip is clearly BELOW its MCP knuckle */
+function fingerCurled(lm, tip, mcp){
+  return lm[tip].y > lm[mcp].y + 0.025;
+}
+
+/* Raw single-frame gesture check — Shadow Clone Sign */
+function rawGestureDetect(lm){
+  const indexUp  = fingerUp(lm, 8,  6);   // Index raised
+  const middleUp = fingerUp(lm, 12, 10);  // Middle raised
+  const ringDown = fingerCurled(lm, 16, 13); // Ring curled
+  const pinkyDown= fingerCurled(lm, 20, 17); // Pinky curled
+  /* Extra: hand should be upright — wrist (0) lower than middle knuckle (9) */
+  const upright  = lm[0].y > lm[9].y;
+  return indexUp && middleUp && ringDown && pinkyDown && upright;
+}
+
+/* Push into ring buffer and return smoothed vote result */
+function votedGesture(detected){
+  voteBuffer[voteIdx % CFG.VOTE_WIN] = detected ? 1 : 0;
+  voteIdx++;
+  return voteBuffer.reduce((a,b)=>a+b,0) >= CFG.VOTE_THRESH;
+}
+
+/* ─────────────────────────────────────────────────────────
+   §4  SOUND ENGINE  (Pure Web Audio API — zero audio files)
+
+   Three synthesized layers:
+     A) Boom  — white noise through a falling low-pass filter
+     B) Whoosh— sawtooth oscillator sweeping from 900→50 Hz
+     C) Ping  — short sine burst for high "chakra" shimmer
+───────────────────────────────────────────────────────── */
+function playJutsuSound(){
+  try{
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+
+    /* A) BOOM */
+    const bLen = ac.sampleRate * 0.7;
+    const bBuf = ac.createBuffer(1, bLen, ac.sampleRate);
+    const bDat = bBuf.getChannelData(0);
+    for(let i=0;i<bLen;i++) bDat[i]=(Math.random()*2-1)*Math.pow(1-i/bLen,4);
+    const bSrc  = ac.createBufferSource(); bSrc.buffer = bBuf;
+    const lpf   = ac.createBiquadFilter();
+    lpf.type='lowpass';
+    lpf.frequency.setValueAtTime(600, ac.currentTime);
+    lpf.frequency.exponentialRampToValueAtTime(60, ac.currentTime+0.5);
+    const bGain = ac.createGain();
+    bGain.gain.setValueAtTime(1.4, ac.currentTime);
+    bGain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime+0.65);
+    bSrc.connect(lpf); lpf.connect(bGain); bGain.connect(ac.destination);
+    bSrc.start();
+
+    /* B) WHOOSH */
+    const osc   = ac.createOscillator(); osc.type='sawtooth';
+    osc.frequency.setValueAtTime(900, ac.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(50, ac.currentTime+0.42);
+    const hpf   = ac.createBiquadFilter(); hpf.type='highpass'; hpf.frequency.value=120;
+    const oGain = ac.createGain();
+    oGain.gain.setValueAtTime(0.35, ac.currentTime);
+    oGain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime+0.42);
+    osc.connect(hpf); hpf.connect(oGain); oGain.connect(ac.destination);
+    osc.start(); osc.stop(ac.currentTime+0.42);
+
+    /* C) PING */
+    const ping  = ac.createOscillator(); ping.type='sine';
+    ping.frequency.setValueAtTime(1200, ac.currentTime);
+    ping.frequency.exponentialRampToValueAtTime(400, ac.currentTime+0.25);
+    const pGain = ac.createGain();
+    pGain.gain.setValueAtTime(0.18, ac.currentTime);
+    pGain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime+0.25);
+    ping.connect(pGain); pGain.connect(ac.destination);
+    ping.start(); ping.stop(ac.currentTime+0.25);
+  }catch(e){ console.warn('Audio unavailable:', e); }
+}
+
+/* ─────────────────────────────────────────────────────────
+   §5  PARTICLE SMOKE SYSTEM
+   ─────────────────────────────────────────────────────────
+
+   Each particle is a plain JS object simulated and drawn
+   on #particle-canvas every animation frame.
+   Particles are drawn as soft radial-gradient circles that
+   expand, rise, rotate, and fade out — mimicking smoke.
+
+   spawnSmokeBurst(cx, cy, count)
+     Spawns `count` particles from canvas-relative (cx, cy).
+     Call multiple times with different origins for a big explosion.
+
+   Three "rings" of particles give depth:
+     Ring 0 = fast, small inner burst
+     Ring 1 = medium mid-range puffs
+     Ring 2 = slow, large outer clouds
+───────────────────────────────────────────────────────── */
+const particles = [];
+
+function createParticle(cx, cy, ring){
+  const angle   = Math.random() * Math.PI * 2;
+  const speeds  = [6.5, 3.8, 2.2];
+  const sizes   = [20,  34,  52];
+  const speed   = speeds[ring] + Math.random()*2;
+  const size    = sizes[ring]  + Math.random()*18;
+  const gray    = Math.floor(130 + Math.random()*90);
+  const isTint  = Math.random() > 0.55;  // ~45% get blue chakra tint
+  return{
+    x: cx + (Math.random()-.5)*25,
+    y: cy + (Math.random()-.5)*25,
+    vx: Math.cos(angle)*speed,
+    vy: Math.sin(angle)*speed - speeds[ring]*0.45, // upward bias
+    size,
+    alpha:  0.65 + Math.random()*.3,
+    decay:  0.011 + Math.random()*.009,
+    rot:    Math.random()*Math.PI*2,
+    rotSpd: (Math.random()-.5)*.09,
+    grow:   0.55 + Math.random()*.4,
+    gray, isTint,
+  };
+}
+
+function spawnSmokeBurst(cx, cy, count){
+  const perRing = Math.floor(count/3);
+  for(let r=0;r<3;r++)
+    for(let i=0;i<perRing;i++)
+      particles.push(createParticle(cx, cy, r));
+}
+
+function tickParticles(){
+  partCtx.clearRect(0,0,partCanvas.width,partCanvas.height);
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.x  += p.vx;  p.y  += p.vy;
+    p.vx *= 0.955; p.vy *= 0.955;
+    p.vy -= 0.045;         // buoyancy: smoke rises
+    p.size += p.grow;
+    p.rot  += p.rotSpd;
+    p.alpha -= p.decay;
+    if(p.alpha<=0){ particles.splice(i,1); continue; }
+
+    partCtx.save();
+    partCtx.translate(p.x, p.y);
+    partCtx.rotate(p.rot);
+    const g = partCtx.createRadialGradient(0,0,0,0,0,p.size);
+    if(p.isTint){
+      g.addColorStop(0,`rgba(150,195,235,${p.alpha})`);
+      g.addColorStop(1,`rgba(100,150,190,0)`);
+    }else{
+      g.addColorStop(0,`rgba(${p.gray},${p.gray},${p.gray+8},${p.alpha})`);
+      g.addColorStop(1,`rgba(${p.gray},${p.gray},${p.gray},0)`);
+    }
+    partCtx.beginPath();
+    partCtx.arc(0,0,p.size,0,Math.PI*2);
+    partCtx.fillStyle = g;
+    partCtx.fill();
+    partCtx.restore();
+  }
+}
+
+/* Particle loop runs independently every frame */
+(function partLoop(){ tickParticles(); requestAnimationFrame(partLoop); })();
+
+/* ─────────────────────────────────────────────────────────
+   §6  SHADOW CLONE IMAGES
+   ─────────────────────────────────────────────────────────
+
+   Captures the current camera frame as a JPEG data-URL,
+   then creates <img> elements styled to appear at 4 positions:
+   left, right, back-left (smaller = looks farther away), back-right.
+
+   Each clone uses CSS custom properties to drive the
+   @keyframes cloneReveal animation with unique enter/rest/exit transforms.
+
+   CSS filter pipeline per clone:
+     hue-rotate → shifts the image to a blue/cold tone
+     brightness → dims it (it's a shadow)
+     saturate   → desaturates toward grayscale
+     blur       → subtle softness
+
+   Clones are appended to <body> (not #scene) so they can
+   visually overflow outside the camera frame.
+───────────────────────────────────────────────────────── */
+
+/*
+  Clone config objects.
+  All offset values are FRACTIONS of scene width/height.
+  enterX/Y: where clone starts (off-screen)
+  peakX/Y:  brief overshoot for snappy pop-in
+  restX/Y:  settled position
+  exitX/Y:  where it drifts to as it fades out
+  scaleX: 1 = same direction, -1 = mirrored (makes it look like a different person)
+*/
+const CLONE_DEFS = [
+  // Left clone
+  { ex:-.9, ey:0,   px:-.68,py:-.04,  rx:-.7, ry:0,    xx:-.9, xy:.1,
+    scale:.62, sx:-1, hue:200, sat:.22, bri:.44, tilt:9 },
+  // Right clone
+  { ex:.9,  ey:0,   px:.68, py:-.04,  rx:.7,  ry:0,    xx:.9,  xy:.1,
+    scale:.62, sx:1,  hue:200, sat:.22, bri:.44, tilt:-9 },
+  // Back-left (smaller = depth illusion)
+  { ex:-.5, ey:-.6, px:-.37,py:-.43,  rx:-.4, ry:-.44, xx:-.58,xy:-.6,
+    scale:.41, sx:-1, hue:210, sat:.18, bri:.33, tilt:5 },
+  // Back-right
+  { ex:.5,  ey:-.6, px:.37, py:-.43,  rx:.4,  ry:-.44, xx:.58, xy:-.6,
+    scale:.41, sx:1,  hue:210, sat:.18, bri:.33, tilt:-5 },
+];
+
+function spawnClones(){
+  const rect     = document.getElementById('scene').getBoundingClientRect();
+  const snapshot = camCanvas.toDataURL('image/jpeg', 0.72);
+
+  CLONE_DEFS.forEach((d, i)=>{
+    const el = document.createElement('img');
+    el.className = 'shadow-clone';
+    el.src = snapshot;
+
+    const W = rect.width * d.scale;
+    const H = rect.height * d.scale;
+    // Base position = scene center adjusted by rest offset
+    const bL = rect.left + rect.width/2  - W/2 + rect.width  * d.rx;
+    const bT = rect.top  + rect.height/2 - H/2 + rect.height * d.ry;
+
+    // Offsets for keyframe transforms (relative to rest position)
+    const dxE = rect.width  * (d.ex - d.rx);
+    const dyE = rect.height * (d.ey - d.ry);
+    const dxP = rect.width  * (d.px - d.rx);
+    const dyP = rect.height * (d.py - d.ry);
+    const dxX = rect.width  * (d.xx - d.rx);
+    const dyX = rect.height * (d.xy - d.ry);
+    const ti  = d.tilt, sx = d.sx;
+
+    el.style.cssText = `
+      width:${W}px;height:${H}px;
+      left:${bL}px;top:${bT}px;
+      filter:blur(1.5px) brightness(${d.bri}) saturate(${d.sat}) hue-rotate(${d.hue}deg);
+      --ce:translateX(${dxE}px) translateY(${dyE}px) scale(${d.scale*.7}) scaleX(${sx}) rotate(${ti*2}deg);
+      --cp:translateX(${dxP}px) translateY(${dyP}px) scale(${d.scale*1.04}) scaleX(${sx}) rotate(${-ti*.3}deg);
+      --cr:translateX(0) translateY(0) scale(${d.scale}) scaleX(${sx}) rotate(${ti*.4}deg);
+      --cx:translateX(${dxX}px) translateY(${dyX}px) scale(${d.scale*.8}) scaleX(${sx}) rotate(${ti*2.2}deg);
+      animation-delay:${i*0.07}s;
+    `;
+    document.body.appendChild(el);
+    setTimeout(()=>el.remove(), 3400);
+  });
+}
+
+/* ─────────────────────────────────────────────────────────
+   §7  SCREEN EFFECTS
+───────────────────────────────────────────────────────── */
+function triggerFlash(){
+  /* White pop */
+  flash.style.transition = 'none';
+  flash.style.background = 'white';
+  flash.style.opacity    = '.95';
+  requestAnimationFrame(()=>{
+    flash.style.transition = 'opacity .14s';
+    flash.style.opacity    = '0';
+  });
+  /* Blue-chakra secondary pulse */
+  setTimeout(()=>{
+    flash.style.transition = 'none';
+    flash.style.background = 'rgba(79,195,247,.4)';
+    flash.style.opacity    = '.85';
+    requestAnimationFrame(()=>{
+      flash.style.transition = 'opacity .22s';
+      flash.style.opacity    = '0';
+    });
+  },220);
+}
+
+function triggerKanji(){
+  kanjiOv.classList.remove('pop');
+  void kanjiOv.offsetWidth;   // force reflow to restart animation
+  kanjiOv.classList.add('pop');
+}
+
+/* Draw the chakra charge ring on fxCanvas */
+function drawChargeRing(progress){
+  const W=fxCanvas.width, H=fxCanvas.height;
+  const cx=W/2, cy=H/2, r=Math.min(W,H)*.41;
+  fxCtx.save();
+
+  /* Dim background track */
+  fxCtx.beginPath(); fxCtx.arc(cx,cy,r,0,Math.PI*2);
+  fxCtx.strokeStyle='rgba(79,195,247,.06)'; fxCtx.lineWidth=8; fxCtx.stroke();
+
+  if(progress<=0){ fxCtx.restore(); return; }
+
+  /* Colored progress arc */
+  const sa = -Math.PI/2, ea = sa + Math.PI*2*progress;
+  const col= progress>=1
+    ? `rgba(245,${Math.floor(200-progress*60)},35,.92)`
+    : 'rgba(79,195,247,.88)';
+
+  fxCtx.beginPath(); fxCtx.arc(cx,cy,r,sa,ea);
+  fxCtx.strokeStyle=col; fxCtx.lineWidth=8; fxCtx.lineCap='round';
+  fxCtx.shadowColor=col; fxCtx.shadowBlur=22; fxCtx.stroke();
+
+  /* Bright dot at the arc's leading tip */
+  fxCtx.beginPath();
+  fxCtx.arc(cx+Math.cos(ea)*r, cy+Math.sin(ea)*r, 5.5, 0, Math.PI*2);
+  fxCtx.fillStyle=col; fxCtx.shadowBlur=30; fxCtx.fill();
+
+  /* Inner golden pulse when fully charged */
+  if(progress>=1){
+    const pulse=0.05+0.05*Math.sin(Date.now()/55);
+    fxCtx.beginPath(); fxCtx.arc(cx,cy,r*.86,0,Math.PI*2);
+    fxCtx.fillStyle=`rgba(245,166,35,${pulse})`;
+    fxCtx.shadowBlur=0; fxCtx.fill();
+  }
+  fxCtx.restore();
+}
+
+/* Small colored dots above each finger tip to show detection state */
+function drawFingerHints(lm, W, H){
+  /* [tipIdx, pipIdx, wantUp] — true=should be up, false=should be curled */
+  const fingers = [[8,6,true],[12,10,true],[16,13,false],[20,17,false]];
+  fingers.forEach(([tip,pip,wantUp])=>{
+    const x = (1-lm[tip].x)*W;   // mirrored x
+    const y = lm[tip].y*H;
+    const correct = wantUp
+      ? lm[tip].y < lm[pip].y - 0.02
+      : lm[tip].y > lm[pip].y + 0.02;
+    fxCtx.save();
+    fxCtx.beginPath(); fxCtx.arc(x, y-16, 5, 0, Math.PI*2);
+    fxCtx.fillStyle   = correct ? 'rgba(102,187,106,.95)' : 'rgba(239,83,80,.85)';
+    fxCtx.shadowColor = correct ? '#66bb6a' : '#ef5350';
+    fxCtx.shadowBlur  = 12;
+    fxCtx.fill(); fxCtx.restore();
+  });
+}
+
+/* ─────────────────────────────────────────────────────────
+   §8  JUTSU MASTER TRIGGER + COOLDOWN SYSTEM
+   ─────────────────────────────────────────────────────────
+
+   COOLDOWN prevents the jutsu from re-firing for COOLDOWN_MS ms.
+   A visible countdown badge + timer shows how long is left.
+   The charge bar is reset to 0 immediately on trigger.
+───────────────────────────────────────────────────────── */
+let jutsuCooldown = false;
+let holdFrames    = 0;
+let cdSecsLeft    = 0;
+let cdTimer       = null;
+
+function setChargeBar(pct){
+  const p = Math.min(1,Math.max(0,pct));
+  chargeFill.style.width = (p*100).toFixed(1)+'%';
+  chargePct.textContent  = Math.round(p*100)+'%';
+  chargeFill.className   = p>=1 ? 'ready' : p>0 ? 'charging' : '';
+}
+
+function beginCooldown(){
+  jutsuCooldown = true;
+  cdSecsLeft    = Math.ceil(CFG.COOLDOWN_MS/1000);
+  cdBadge.classList.add('on');
+  statusDot.className = 'cooldown';
+
+  const tick = ()=>{
+    cdSecsLeft--;
+    statusTxt.textContent = `Cooldown ${cdSecsLeft}s…`;
+    if(cdSecsLeft > 0){
+      cdTimer = setTimeout(tick, 1000);
+    }else{
+      jutsuCooldown = false;
+      cdBadge.classList.remove('on');
+      statusDot.className   = 'live';
+      statusTxt.textContent = 'Scanning…';
+    }
+  };
+  cdTimer = setTimeout(tick, 1000);
+}
+
+function fireJutsu(){
+  if(jutsuCooldown) return;
+  holdFrames = 0;
+  setChargeBar(0);
+
+  /* ── Fire all effects ── */
+  playJutsuSound();                     // immediate audio
+  triggerFlash();                       // immediate flash
+
+  /* Smoke from scene center + four corner clusters */
+  const W = partCanvas.width, H = partCanvas.height;
+  spawnSmokeBurst(W*.5,  H*.5,  CFG.PARTICLES);
+  spawnSmokeBurst(W*.22, H*.68, Math.floor(CFG.PARTICLES*.5));
+  spawnSmokeBurst(W*.78, H*.68, Math.floor(CFG.PARTICLES*.5));
+  spawnSmokeBurst(W*.12, H*.32, Math.floor(CFG.PARTICLES*.35));
+  spawnSmokeBurst(W*.88, H*.32, Math.floor(CFG.PARTICLES*.35));
+
+  setTimeout(spawnClones,  110);        // clones pop in just after flash
+  setTimeout(triggerKanji, 85);         // kanji overlaps with clones
+
+  statusTxt.textContent = '⚡ JUTSU ACTIVATED!';
+  statusDot.className   = 'hold';
+
+  setTimeout(beginCooldown, 550);
+}
+
+/* ─────────────────────────────────────────────────────────
+   §9  MEDIAPIPE HANDS + RENDER LOOP
+───────────────────────────────────────────────────────── */
+const hands = new Hands({
+  locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+});
+hands.setOptions({
+  maxNumHands:             1,    // 1 = faster; set 2 for two-hand detection
+  modelComplexity:         1,    // 0=lite 1=full; full is more accurate
+  minDetectionConfidence:  0.78,
+  minTrackingConfidence:   0.65,
+});
+
+hands.onResults(results=>{
+  const W=camCanvas.width, H=camCanvas.height;
+
+  /* Draw mirrored camera frame onto camCanvas */
+  camCtx.save();
+  camCtx.clearRect(0,0,W,H);
+  camCtx.translate(W,0); camCtx.scale(-1,1);
+  camCtx.drawImage(results.image,0,0,W,H);
+  camCtx.restore();
+
+  fxCtx.clearRect(0,0,W,H);
+
+  let rawDetected = false;
+
+  if(results.multiHandLandmarks?.length){
+    const lm = results.multiHandLandmarks[0];
+
+    /* Draw hand skeleton — landmarks live in non-mirrored space,
+       so we flip the fxCtx, draw, then restore */
+    fxCtx.save();
+    fxCtx.translate(W,0); fxCtx.scale(-1,1);
+    drawConnectors(fxCtx, lm, HAND_CONNECTIONS, {color:'rgba(79,195,247,.42)',lineWidth:2});
+    drawLandmarks(fxCtx, lm, {color:'rgba(245,166,35,.85)',fillColor:'rgba(245,166,35,.22)',lineWidth:1,radius:3.5});
+    fxCtx.restore();
+
+    /* Finger-state indicator dots (mirrored canvas coords) */
+    drawFingerHints(lm, W, H);
+
+    rawDetected = rawGestureDetect(lm);
+  }
+
+  /* Apply voting buffer for stable detection */
+  const gestureOn = votedGesture(rawDetected);
+
+  /* Update hold counter */
+  if(gestureOn && !jutsuCooldown){
+    holdFrames = Math.min(holdFrames+1, CFG.HOLD_FRAMES);
+    const p    = holdFrames/CFG.HOLD_FRAMES;
+    drawChargeRing(p);
+    setChargeBar(p);
+    statusDot.className   = 'hold';
+    statusTxt.textContent = p>=1 ? '⚡ RELEASE!' : `Charging… ${Math.round(p*100)}%`;
+    if(holdFrames >= CFG.HOLD_FRAMES) fireJutsu();
+  }else{
+    holdFrames = Math.max(0, holdFrames - CFG.DECAY_RATE);
+    const p    = holdFrames/CFG.HOLD_FRAMES;
+    if(p>0) drawChargeRing(p);
+    setChargeBar(p);
+    if(!jutsuCooldown){
+      statusDot.className   = 'live';
+      statusTxt.textContent = rawDetected ? 'Gesture seen…' : 'Scanning…';
+    }
+  }
+});
+
+/* ─────────────────────────────────────────────────────────
+   §10  CAMERA START
+───────────────────────────────────────────────────────── */
+async function startCamera(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{ width:CFG.W, height:CFG.H, facingMode:'user', frameRate:{ideal:30} },
+      audio:false,
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    /* MediaPipe Camera utility pumps each video frame to the Hands model */
+    const cam = new Camera(video,{
+      onFrame: async()=>{ await hands.send({image:video}); },
+      width:CFG.W, height:CFG.H,
+    });
+    cam.start();
+
+    statusDot.className   = 'live';
+    statusTxt.textContent = 'Scanning…';
+    loader.classList.add('gone');
+    setTimeout(()=>loader.style.display='none', 700);
+
+  }catch(err){
+    console.error(err);
+    lerr.style.display  = 'block';
+    lerr.textContent    = '⚠ Camera access denied — allow permission and reload.';
+    document.querySelector('.ls').textContent = 'Initialization failed.';
+  }
+}
+
+startCamera();
+</script>
+</body>
+</html>
